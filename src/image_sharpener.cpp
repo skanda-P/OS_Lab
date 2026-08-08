@@ -70,8 +70,25 @@ struct image_t* S2_find_details(struct image_t *input_image, struct image_t *smo
 
 struct image_t* S3_sharpen(struct image_t *input_image, struct image_t *details_image)
 {
-	// TODO
-	return input_image; //TODO remove this line when adding your code
+	int width  = input_image->width;
+	int height = input_image->height;
+
+	struct image_t* sharpened_image = allocate_image(width, height);
+
+	for(int i = 0; i < height; i++)
+	{
+		for(int j = 0; j < width; j++)
+		{
+			for(int k = 0; k < 3; k++)
+			{
+				int sum = (int)input_image->image_pixels[i][j][k]
+				        + (int)details_image->image_pixels[i][j][k];
+				sharpened_image->image_pixels[i][j][k] = clamp_to_byte(sum);
+			}
+		}
+	}
+
+	return sharpened_image;
 }
 
 int main(int argc, char **argv)
