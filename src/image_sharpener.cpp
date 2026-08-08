@@ -47,8 +47,25 @@ struct image_t* S1_smoothen(struct image_t *input_image)
 
 struct image_t* S2_find_details(struct image_t *input_image, struct image_t *smoothened_image)
 {
-	// TODO
-	return 0;
+	int width  = input_image->width;
+	int height = input_image->height;
+
+	struct image_t* details_image = allocate_image(width, height);
+
+	for(int i = 0; i < height; i++)
+	{
+		for(int j = 0; j < width; j++)
+		{
+			for(int k = 0; k < 3; k++)
+			{
+				int diff = (int)input_image->image_pixels[i][j][k]
+				         - (int)smoothened_image->image_pixels[i][j][k];
+				details_image->image_pixels[i][j][k] = clamp_to_byte(diff);
+			}
+		}
+	}
+
+	return details_image;
 }
 
 struct image_t* S3_sharpen(struct image_t *input_image, struct image_t *details_image)
