@@ -6,9 +6,43 @@ using namespace std;
 
 struct image_t* S1_smoothen(struct image_t *input_image)
 {
-	// TODO
-	// remember to allocate space for smoothened_image. See read_ppm_file() in libppm.c for some help.
-	return 0;
+	int width  = input_image->width;
+	int height = input_image->height;
+
+	struct image_t* smoothened_image = allocate_image(width, height);
+
+	for(int i = 0; i < height; i++)
+	{
+		for(int j = 0; j < width; j++)
+		{
+			for(int k = 0; k < 3; k++)
+			{
+				int sum   = 0;
+				int count = 0;
+
+				for(int di = -1; di <= 1; di++)
+				{
+					for(int dj = -1; dj <= 1; dj++)
+					{
+						int ni = i + di;
+						int nj = j + dj;
+
+						if(ni < 0) ni = 0;
+						if(ni >= height) ni = height - 1;
+						if(nj < 0) nj = 0;
+						if(nj >= width) nj = width - 1;
+
+						sum += input_image->image_pixels[ni][nj][k];
+						count++;
+					}
+				}
+
+				smoothened_image->image_pixels[i][j][k] = (uint8_t)(sum / count);
+			}
+		}
+	}
+
+	return smoothened_image;
 }
 
 struct image_t* S2_find_details(struct image_t *input_image, struct image_t *smoothened_image)
