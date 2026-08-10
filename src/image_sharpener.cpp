@@ -4,6 +4,42 @@
 
 using namespace std;
 
+struct image_t* allocate_image(int width,int height){
+
+	// Main Structure
+	struct image_t* img  = new struct image_t;
+	img->width = width;
+	img->height = height;
+	
+	// Allocate Rows (Height)
+	img->image_pixels = new uint8_t**[height];
+
+	for(int i = 0; i < height; i++){
+		// Allocate column for each row (Width)
+		img->image_pixels[i] = new uint8_t*[width];
+		for(int j = 0; j < width ; j++){
+			// Allocate RGB channels for each pixel
+			img->image_pixels[i][j] = new uint8_t[3];
+		}
+	}
+
+	return img;
+
+}
+
+uint8_t clamp_to_byte(int val){
+	if(val < 0){
+		return 0;	
+	}
+	if(val > 255){
+		return 255;
+	}
+
+	return (uint8_t)val;
+}
+
+
+
 struct image_t* S1_smoothen(struct image_t *input_image)
 {
 	int width  = input_image->width;
@@ -58,8 +94,8 @@ struct image_t* S2_find_details(struct image_t *input_image, struct image_t *smo
 		{
 			for(int k = 0; k < 3; k++)
 			{
-				int diff = (int)input_image->image_pixels[i][j][k]
-				         - (int)smoothened_image->image_pixels[i][j][k];
+				int diff = input_image->image_pixels[i][j][k]
+				         - smoothened_image->image_pixels[i][j][k];
 				details_image->image_pixels[i][j][k] = clamp_to_byte(diff);
 			}
 		}
@@ -81,9 +117,9 @@ struct image_t* S3_sharpen(struct image_t *input_image, struct image_t *details_
 		{
 			for(int k = 0; k < 3; k++)
 			{
-				int sum = (int)input_image->image_pixels[i][j][k]
-				        + (int)details_image->image_pixels[i][j][k];
-				sharpened_image->image_pixels[i][j][k] = clamp_to_byte(sum);
+				int original = (int)input_image->image_pixels[i][j][k];
+				int detail = (int8_t)details_image->image_pixels	[i][j][k];
+				sharpened_image->image_pixels[i][j][k] = clamp_to_byte(original + detail);
 			}
 		}
 	}
