@@ -1,7 +1,7 @@
 #include <iostream>
 #include "libppm.h"
 #include <cstdint>
-
+#include<chrono>
 using namespace std;
 
 struct image_t* allocate_image(int width,int height){
@@ -63,13 +63,19 @@ struct image_t* S1_smoothen(struct image_t *input_image)
 						int ni = i + di;
 						int nj = j + dj;
 
-						if(ni < 0) ni = 0;
-						if(ni >= height) ni = height - 1;
-						if(nj < 0) nj = 0;
-						if(nj >= width) nj = width - 1;
+						// if(ni < 0) ni = 0;
+						// if(ni >= height) ni = height - 1;
+						// if(nj < 0) nj = 0;
+						// if(nj >= width) nj = width - 1;
 
-						sum += input_image->image_pixels[ni][nj][k];
-						count++;
+						// sum += input_image->image_pixels[ni][nj][k];
+						// count++;
+
+                        // Only add to the sum if the neighbor actually exists inside the image
+                        if(ni >= 0 && ni < height && nj >= 0 && nj < width){
+                            sum += input_image->image_pixels[ni][nj][k];
+                            ++count;
+                        }
 					}
 				}
 
@@ -94,9 +100,10 @@ struct image_t* S2_find_details(struct image_t *input_image, struct image_t *smo
 		{
 			for(int k = 0; k < 3; k++)
 			{
-				int diff = input_image->image_pixels[i][j][k]
-				         - smoothened_image->image_pixels[i][j][k];
-				details_image->image_pixels[i][j][k] = clamp_to_byte(diff);
+				int diff = input_image->image_pixels[i][j][k] - smoothened_image->image_pixels[i][j][k]; 
+				// details_image->image_pixels[i][j][k] = clamp_to_byte(diff);
+                // Assign directly without clamping to preserve negative values
+                details_image->image_pixels[i][j][k] = diff;
 			}
 		}
 	}
@@ -134,16 +141,39 @@ int main(int argc, char **argv)
 		cout << "usage: ./a.out <path-to-original-image> <path-to-transformed-image>\n\n";
 		exit(0);
 	}
-	
+
+    //Clock Start
+	auto t1 = chrono::high_resolution_clock::now();
+
 	struct image_t *input_image = read_ppm_file(argv[1]);
-	
+
+	auto f1 = chrono::high_resolution_clock::now();
+
 	struct image_t *smoothened_image = S1_smoothen(input_image);
-	
+
+	auto t2 = chrono::high_resolution_clock::now();
+
 	struct image_t *details_image = S2_find_details(input_image, smoothened_image);
 	
+    auto f2 = chrono::high_resolution_clock::now();
+
 	struct image_t *sharpened_image = S3_sharpen(input_image, details_image);
 	
+    auto t3 = chrono::high_resolution_clock::now();
+
 	write_ppm_file(argv[2], sharpened_image);
 	
+    auto f3 = chrono::high_resolution_clock::now();        
+
+    //Calculating Duration
+
+    double read_time = chrono::duration<double,milli>(f1-t1).count();
+    double s1_time = chrono::duration<double,milli>(t2-f1).count();
+    double s2_time = chrono::duration<double,milli>(f2-t2).count();
+    double s3_time = chrono::duration<double,milli>(t3-f2).count();
+    double write_time = chrono::duration<double,milli>(f3-t3).count();
+    
+
+    cout << "METRICS: " << read_time << " " << s1_time << " " << s2_time << " " << s3_time << " " << write_time << endl;
 	return 0;
 }
