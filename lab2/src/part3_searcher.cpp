@@ -21,8 +21,35 @@ int main(int argc, char **argv)
 	int search_start_position = atoi(argv[3]);
 	int search_end_position = atoi(argv[4]);
 
-	//TODO
-	
-	cout << "[-1] didn't find\n";
+	pid_t pid = getpid();
+
+	ifstream file(file_to_search_in);
+	if(!file.is_open())
+	{
+		cout << "[-1] failed to open file: " << file_to_search_in << "\n";
+		return -1;
+	}
+
+	int length_to_search = search_end_position - search_start_position + 1;
+
+	if(length_to_search > 0)
+	{
+		file.seek(search_start_position);
+		string file_chunk;
+		file_chunk.resize(length_to_search);
+		file.read(&file_chunk[0], length_to_search);
+		file_chunk.resize(file.gcount());
+
+		string pattern(pattern_to_search_for);
+		size_t found_position = file_chunk.find(pattern);
+		if(found_position != string::npos)
+		{
+			// Pattern found
+			cout << "[" << pid << "] found at " << (search_start_position + found_position) << "\n";
+			return 1;	
+		}
+	}
+
+cout << "[" << pid << "] didn't find\n";
 	return 0;
 }

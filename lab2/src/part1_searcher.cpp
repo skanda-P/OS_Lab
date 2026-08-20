@@ -34,7 +34,7 @@ int main(int argc, char **argv)
 
 	if(length_to_search > 0)
 	{
-		file.seek(search_start_position);
+		file.seekg(search_start_position);
 		string file_chunk;
 		file_chunk.resize(length_to_search);
 		file.read(&file_chunk[0], length_to_search);
@@ -50,6 +50,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-cout << "[" << my_pid << "] didn't find\n";
+cout << "[" << pid << "] didn't find\n";
 	return 0;
 }
