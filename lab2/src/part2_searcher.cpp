@@ -21,7 +21,7 @@ int main(int argc, char **argv)
 	int search_start_position = atoi(argv[3]);
 	int search_end_position = atoi(argv[4]);
 
-	pid_t pid = getpid();
+	pid_t my_pid = getpid();
 
 	ifstream file(file_to_search_in);
 	if(!file.is_open())
@@ -34,7 +34,7 @@ int main(int argc, char **argv)
 
 	if(length_to_search > 0)
 	{
-		file.seek(search_start_position);
+		file.seekg(search_start_position);
 		string file_chunk;
 		file_chunk.resize(length_to_search);
 		file.read(&file_chunk[0], length_to_search);
@@ -45,7 +45,7 @@ int main(int argc, char **argv)
 		if(found_position != string::npos)
 		{
 			// Pattern found
-			cout << "[" << pid << "] found at " << (search_start_position + found_position) << "\n";
+			cout << "[" << my_pid << "] found at " << (search_start_position + found_position) << "\n";
 			return 1;	
 		}
 	}
