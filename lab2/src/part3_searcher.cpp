@@ -1,21 +1,33 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
-#include <unistd.h>
+#include <cstdlib>
 #include <signal.h>
+#include <unistd.h>
 
 using namespace std;
+
+// A searcher has no children of its own, so on SIGTERM it just
+// announces itself and exits immediately.
+void handle_sigterm(int /*signum*/)
+{
+	cout << "[" << getpid() << "] received SIGTERM\n";
+	_exit(0);
+}
 
 int main(int argc, char **argv)
 {
 	if(argc != 5)
 	{
-		cout <<"usage: ./partitioner.out <path-to-file> <pattern> <search-start-position> <search-end-position>\nprovided arguments:\n";
+		cout <<"usage: ./searcher.out <path-to-file> <pattern> <search-start-position> <search-end-position>\nprovided arguments:\n";
 		for(int i = 0; i < argc; i++)
 			cout << argv[i] << "\n";
 		return -1;
 	}
-	
+
+	signal(SIGTERM, handle_sigterm);
+	cout << unitbuf; // flush after every print so nothing is lost if we're _exit()'d mid-flight
+
 	char *file_to_search_in = argv[1];
 	char *pattern_to_search_for = argv[2];
 	int search_start_position = atoi(argv[3]);
@@ -34,7 +46,7 @@ int main(int argc, char **argv)
 
 	if(length_to_search > 0)
 	{
-		file.seek(search_start_position);
+		file.seekg(search_start_position);
 		string file_chunk;
 		file_chunk.resize(length_to_search);
 		file.read(&file_chunk[0], length_to_search);
@@ -46,10 +58,10 @@ int main(int argc, char **argv)
 		{
 			// Pattern found
 			cout << "[" << pid << "] found at " << (search_start_position + found_position) << "\n";
-			return 1;	
+			return 1;
 		}
 	}
 
-cout << "[" << pid << "] didn't find\n";
+	cout << "[" << pid << "] didn't find\n";
 	return 0;
 }
