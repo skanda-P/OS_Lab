@@ -36,7 +36,6 @@ int main(int argc, char **argv)
 	if(length <= max_chunk_size){
 		// Base Case : Range is within max_chunk_size, so we search it directly.
 		pid_t searcher_pid = fork();
-
 		if(searcher_pid == 0){
 			// Child: Replace the current process image with the searcher executable
 			execl("./part2_searcher.out","./part2_searcher.out",argv[1],argv[2],argv[3],argv[4],NULL);
