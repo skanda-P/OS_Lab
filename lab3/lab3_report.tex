@@ -1,0 +1,492 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\definecolor{codebg}{rgb}{0.96,0.96,0.96}
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!40!black},
+  showstringspaces=false,
+  tabsize=4
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Lab 3: Process Scheduling}
+\lhead{Skanda P, Narapogu Suhas}
+\cfoot{\thepage}
+
+\title{\textbf{Laboratory 3: Process Scheduling}\\[4pt]
+\large Simulation and Comparative Analysis of CPU Scheduling Algorithms}
+\author{Skanda P \; (CS24BT045) \and Narapogu Suhas \; (CS24BT019)}
+\date{}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+The goal of this assignment is to build a simulator for CPU scheduling
+algorithms and use it to study how different scheduling policies affect
+process turnaround time. As specified in the assignment, the simulator reads
+a workload description file in which each line represents one process:
+
+\begin{center}
+\texttt{<arrival-time> <cpu-burst-1> <io-burst-1> <cpu-burst-2> <io-burst-2> ... -1}
+\end{center}
+
+and is invoked from the command line as
+
+\begin{center}
+\texttt{./simulator <algorithm> <path-to-workload-file>}
+\end{center}
+
+(with an optional numeric parameter -- time quantum for Round Robin, or
+boost interval for MLFQ -- inserted between the algorithm name and the
+workload file path).
+
+The simulator produces two things: (1) the resulting \emph{schedule}, in the
+format given in \texttt{schedule\_format.txt}, and (2) summary statistics:
+the average turnaround time, the maximum turnaround time, and the
+simulator's run time (the total CPU-burst time, excluding I/O).
+
+Part I of the assignment implements FIFO, Round Robin, and MLFQ for a
+single processor. Part II re-evaluates the same three algorithms with two
+processors sharing a common set of ready queues.
+
+% ============================================================
+\section{Design of the Simulator}
+% ============================================================
+
+\subsection{Process representation}
+Every process is represented by a single \texttt{struct} that stores both the
+static description read from the workload file and the dynamic state needed
+during simulation:
+
+\begin{lstlisting}[language=C++, caption={Process data structure (\texttt{src/simulator\_part1.cpp})}]
+struct Process {
+    int pid;
+    int arrival_time;
+    vector<int> bursts;   // even indices: CPU bursts, odd indices: I/O bursts
+    int curr_b_idx;       // index of the burst currently being served
+    int remaining_b_time; // time left in the current burst
+    int completion_time;  // time at which the process finishes entirely
+    int queue_level;      // MLFQ priority level: 0 (highest) .. 2 (lowest)
+};
+\end{lstlisting}
+
+Storing the CPU and I/O bursts of a process in a single alternating vector
+(\texttt{bursts[0]} = CPU, \texttt{bursts[1]} = I/O, \texttt{bursts[2]} =
+CPU, \ldots) keeps the description compact and lets the simulator move
+between phases simply by incrementing \texttt{curr\_b\_idx}.
+
+\subsection{Queues}
+The simulator maintains:
+\begin{itemize}[nosep]
+  \item a single FIFO \texttt{ready\_queue} used by both the FIFO and Round
+        Robin algorithms,
+  \item three FIFO queues \texttt{mlfq\_queues[0..2]} for MLFQ, with
+        \texttt{mlfq\_queues[0]} the highest-priority queue, and
+  \item a list \texttt{io\_waiters} of processes currently performing I/O.
+\end{itemize}
+
+\subsection{Discrete-time event loop}
+The simulator advances time one unit ("tick") at a time. In every tick it:
+\begin{enumerate}[nosep]
+  \item admits any processes whose arrival time equals the current time
+        into the ready queue (or \texttt{mlfq\_queues[0]} for MLFQ);
+  \item applies a periodic priority boost for MLFQ if the boost interval has
+        elapsed, moving every process in \texttt{mlfq\_queues[1..2]}, every
+        process doing I/O, and the currently running process back to queue
+        level 0;
+  \item dispatches an idle CPU from the highest non-empty queue if one is
+        available;
+  \item executes the running process(es) and all processes performing I/O
+        for one time unit;
+  \item checks for I/O completion (moving processes back into the ready
+        queues) and for CPU burst completion or time-quantum expiry
+        (recording a schedule entry and either retiring the process,
+        moving it to I/O, or re-queuing it, possibly at a lower MLFQ
+        level).
+\end{enumerate}
+This tick-based design keeps FIFO, Round Robin, and MLFQ under a single,
+uniform simulation loop: FIFO is simply Round Robin with an infinite
+quantum (quantum $=0$ disables preemption), and MLFQ reuses the same
+dispatch/preemption logic with three queues and a quantum of 2 for every
+level.
+
+\subsection{Part II: two processors}
+For Part II (\texttt{src/simulator\_part2.cpp}), the ready queue(s) and the
+I/O-waiting pool remain \emph{shared} across processors, but each of the two
+processors keeps its own currently-running process, its own quantum
+counter, and its own schedule log. On every tick, both idle processors are
+allowed to dequeue a process (dispatch phase) before either processor
+executes, and both processors then advance their assigned process by one
+time unit in the same tick, faithfully modeling true parallel execution.
+The output schedule is printed once per processor (\texttt{CPU0},
+\texttt{CPU1}), matching the format required by
+\texttt{schedule\_format.txt}.
+
+\subsection{Command line interface}
+Both simulators are invoked as
+\begin{lstlisting}
+./sim_part1 FIFO <workload-file>
+./sim_part1 RR <quantum> <workload-file>
+./sim_part1 MLFQ <boost-interval> <workload-file>
+\end{lstlisting}
+(and analogously \texttt{./sim\_part2} for two processors). A boost interval
+of \texttt{0} for MLFQ disables the periodic priority boost.
+
+% ============================================================
+\section{Part I: Single-Processor Scheduling}
+% ============================================================
+
+All experiments below use the five workload description files supplied with
+the assignment, located in \texttt{src/test\_cases/} and named
+\texttt{process1.txt} through \texttt{process5.txt}. We refer to them as
+Workload 1 -- Workload 5. Workload
+4 (three processes, several CPU/I/O cycles) and Workload 5 (six processes,
+four of which arrive together with identical burst patterns) are used for
+the quantum and boost studies below, since they are the most representative
+of realistic multiprogrammed workloads; Workloads 1--3 are simpler
+sanity-check inputs (pure-CPU jobs, and short/cheap I/O jobs respectively).
+
+\subsection{FIFO}
+Table~\ref{tab:fifo} shows the turnaround-time statistics obtained by running
+FIFO on all five workloads.
+
+\begin{table}[H]
+\centering
+\caption{FIFO results, single processor}
+\label{tab:fifo}
+\begin{tabular}{lccc}
+\toprule
+Workload & Avg.\ Turnaround & Max.\ Turnaround & Run Time \\
+\midrule
+1 & 363.33 & 590 & 600 \\
+2 & 525.00 & 600 & 600 \\
+3 &  14.50 &  16 &  12 \\
+4 & 123.00 & 163 & 150 \\
+5 & 189.00 & 225 & 240 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Because FIFO is non-preemptive, once a process starts running it keeps the
+CPU until it either finishes a CPU burst (and moves to I/O) or terminates.
+This is visible in the sample schedule for Workload 4 in
+Table~\ref{tab:sample-schedule}: \texttt{P1} runs uninterrupted for its
+entire first burst (time 1--30) before \texttt{P2} is even allowed to start,
+even though \texttt{P2} and \texttt{P3} arrived earlier or at the same time
+as some of \texttt{P1}'s later bursts. Consequently, FIFO strongly favors
+processes that are scheduled early and can starve short jobs that arrive
+slightly later -- \texttt{P3} in Workload 4, despite having very short CPU
+bursts, ends up with the largest turnaround time (163) simply because it is
+queued behind the two longer processes.
+
+\begin{table}[H]
+\centering
+\caption{Sample schedule excerpt: FIFO on Workload 4 (\texttt{P<pid>,<burst\#>\ \ start\ \ end})}
+\label{tab:sample-schedule}
+\begin{tabular}{lccc}
+\toprule
+Entry & Start & End & \\
+\midrule
+P1,1 & 1   & 30  \\
+P2,1 & 31  & 40  \\
+P3,1 & 41  & 43  \\
+P1,2 & 44  & 73  \\
+P2,2 & 74  & 83  \\
+P3,2 & 84  & 86  \\
+\ldots & & & (P3 is repeatedly delayed behind P1/P2) \\
+P3,10& 176 & 178 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Round Robin}
+We swept the time quantum over $\{1, 2, 4, 8\}$ time units and measured the
+average turnaround time for Workload 4 and Workload 5
+(Figure~\ref{fig:rr1cpu}, Table~\ref{tab:rr1cpu}).
+
+\begin{table}[H]
+\centering
+\caption{Round Robin: average turnaround time vs.\ quantum, single processor}
+\label{tab:rr1cpu}
+\begin{tabular}{lcccc}
+\toprule
+Quantum & 1 & 2 & 4 & 8 \\
+\midrule
+Workload 4 & 130.00 & 131.33 & 131.67 & 128.33 \\
+Workload 5 & 203.83 & 215.67 & 207.17 & 205.67 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{figs/rr_quantum_1cpu.png}
+  \caption{Average turnaround time as a function of the Round Robin time
+  quantum, single processor.}
+  \label{fig:rr1cpu}
+\end{figure}
+
+\paragraph{Observations.} The turnaround time does not vary monotonically
+with the quantum; instead it is fairly flat and workload-dependent. A very
+small quantum ($q=1$) gives the best average turnaround for both workloads
+here because it lets short/interactive bursts interleave tightly with
+longer ones, closely approximating processor sharing, but it does so at the
+cost of a much larger number of context switches (visible as many more,
+shorter entries in the schedule than under FIFO). A very large quantum
+($q=8$) starts to behave like FIFO for bursts shorter than the quantum,
+which is why its performance on Workload 4 is close to the $q=1$ case for
+this particular process mix. Intermediate quanta ($q=2,4$) are
+occasionally slightly worse here because they interact less favorably with
+the specific burst lengths in the workload (e.g.\ a 30-unit burst split
+into chunks of 4 versus chunks of 8 changes exactly which process is
+waiting when I/O bursts complete). This illustrates the classical
+trade-off: very small quanta approach fairness/interactivity at the cost of
+scheduling overhead, while very large quanta approach FIFO behaviour and
+can reintroduce the same starvation-of-short-jobs effect that plain FIFO
+exhibits.
+
+\subsection{Multi-Level Feedback Queue (MLFQ)}
+MLFQ was implemented with three queues $Q_0$ (highest priority) to $Q_2$
+(lowest), each with a time quantum of 2. A process enters $Q_0$ on arrival;
+if it uses its full quantum without finishing its burst it is demoted one
+level (to a minimum of $Q_2$), and it is returned to whichever level it was
+at after finishing an I/O burst. We compared no periodic boost against a
+boost every 20 time units, where the boost resets every process (whether
+in a queue, running, or doing I/O) back to $Q_0$.
+
+\begin{table}[H]
+\centering
+\caption{MLFQ: effect of periodic priority boost, single processor}
+\label{tab:mlfq1cpu}
+\begin{tabular}{lcc}
+\toprule
+Workload & No boost & Boost every 20 \\
+\midrule
+4 & 135.33 & 131.67 \\
+5 & 212.83 & 206.17 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.65\textwidth]{figs/mlfq_boost_1cpu.png}
+  \caption{Average turnaround time with and without periodic priority
+  boosting, single processor.}
+  \label{fig:mlfq1cpu}
+\end{figure}
+
+\paragraph{Observations.} Without a boost, a long-running, CPU-bound
+process is quickly demoted to $Q_2$ and, if new processes keep arriving and
+occupying $Q_0$/$Q_1$, it can be starved for a long time -- exactly the
+classical MLFQ starvation problem. Periodically boosting every process back
+to $Q_0$ every 20 time units gives previously-demoted processes another
+chance to run at high priority, which reduces both the average and, in our
+experiments, the tail turnaround times slightly. The effect is modest for
+these particular (short) workloads because the total run length is small
+relative to the boost interval, but the direction of the effect -- boosting
+reduces average turnaround time by reducing starvation of long-running
+processes -- matches the expected behaviour of MLFQ described by Arpaci-Dusseau
+and Arpaci-Dusseau's ``rule of thumb'': periodic boosting guarantees
+CPU-bound processes are not permanently starved.
+
+% ============================================================
+\section{Part II: Two-Processor Scheduling}
+% ============================================================
+
+For Part II, the same three algorithms were re-evaluated with the queues
+shared between two processors (\texttt{sim\_part2}). Both processors dequeue
+independently from the shared ready queue(s) but execute in the same
+simulated tick, so a workload with enough parallel-CPU-burst opportunities
+should see close to a $2\times$ reduction in turnaround time (limited by
+inherently sequential dependencies, e.g.\ a single process cannot use both
+processors at once, and I/O bursts remain serial per process).
+
+\subsection{FIFO}
+\begin{table}[H]
+\centering
+\caption{FIFO results, two processors}
+\label{tab:fifo2}
+\begin{tabular}{lccc}
+\toprule
+Workload & Avg.\ Turnaround & Max.\ Turnaround & Run Time \\
+\midrule
+1 & 230.00 & 390 & 600 \\
+2 & 275.00 & 300 & 600 \\
+3 &  13.50 &  14 &  12 \\
+4 &  81.33 &  93 & 150 \\
+5 & 104.33 & 119 & 240 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Round Robin}
+\begin{table}[H]
+\centering
+\caption{Round Robin: average turnaround time vs.\ quantum, two processors}
+\label{tab:rr2cpu}
+\begin{tabular}{lcccc}
+\toprule
+Quantum & 1 & 2 & 4 & 8 \\
+\midrule
+Workload 4 & 81.67 & 79.67 & 81.67 & 81.67 \\
+Workload 5 & 107.50 & 107.33 & 106.83 & 105.67 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{figs/rr_quantum_2cpu.png}
+  \caption{Average turnaround time as a function of the Round Robin time
+  quantum, two processors.}
+  \label{fig:rr2cpu}
+\end{figure}
+
+\paragraph{Observations.} With two processors the sensitivity of average
+turnaround time to the choice of quantum shrinks considerably (the curves
+in Figure~\ref{fig:rr2cpu} are much flatter than in
+Figure~\ref{fig:rr1cpu}). With extra CPU capacity, processes spend far less
+time waiting in the ready queue in the first place, so the quantum -- which
+mainly governs how ready-queue waiting time is distributed among
+runnable processes -- has less to redistribute.
+
+\subsection{MLFQ}
+\begin{table}[H]
+\centering
+\caption{MLFQ: effect of periodic priority boost, two processors}
+\label{tab:mlfq2cpu}
+\begin{tabular}{lcc}
+\toprule
+Workload & No boost & Boost every 20 \\
+\midrule
+4 & 80.67 & 80.33 \\
+5 & 107.50 & 110.17 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Observations.} With two processors, both queues drain quickly
+enough that processes rarely accumulate the amount of ready-queue waiting
+time needed to be demoted far enough for starvation to become a real risk;
+consequently periodic boosting has little to no benefit, and for Workload 5
+it is even marginally worse, because the boost briefly promotes
+long-running processes ahead of newly-demoted short ones, adding a small
+amount of extra waiting for the latter. This is consistent with the
+general expectation that priority-boost tuning matters most when the
+system is CPU-constrained.
+
+\subsection{Comparing one processor against two processors}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.75\textwidth]{figs/compare_1v2_wl4.png}
+  \caption{Workload 4: average turnaround time, 1 CPU vs.\ 2 CPUs, for each
+  algorithm (using the best-performing quantum/boost setting from Part I).}
+  \label{fig:compare4}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.75\textwidth]{figs/compare_1v2_wl5.png}
+  \caption{Workload 5: average turnaround time, 1 CPU vs.\ 2 CPUs, for each
+  algorithm.}
+  \label{fig:compare5}
+\end{figure}
+
+Across every algorithm and workload we tested, adding a second processor
+roughly halves the average turnaround time (e.g.\ FIFO on Workload 4 drops
+from 123.0 to 81.3, and on Workload 5 from 189.0 to 104.3). The reduction
+is largest for FIFO, since FIFO's main weakness -- a process blocking the
+CPU while others wait -- is directly alleviated by a second CPU that can
+serve a waiting process concurrently. Round Robin and MLFQ, which already
+mitigate that weakness through preemption on a single CPU, show a smaller
+\emph{relative} improvement, though the improvement in \emph{absolute}
+turnaround time is still substantial. Interestingly, the ranking of
+algorithms by average turnaround time is not always preserved when going
+from one to two processors: MLFQ and Round Robin are the best performers on
+one CPU, but with two CPUs FIFO becomes competitive with (and on Workload 5,
+slightly better than) MLFQ, since with ample CPU capacity the preemption
+overhead of RR/MLFQ (extra context switches without a corresponding
+reduction in queue waiting) yields no further benefit.
+
+% ============================================================
+\section{Summary of Findings}
+% ============================================================
+\begin{itemize}
+  \item \textbf{FIFO} is simple and has zero preemption overhead, but is
+        highly sensitive to arrival order: a long process can force much
+        shorter processes that arrive shortly after it to wait
+        disproportionately long, inflating both average and maximum
+        turnaround time.
+  \item \textbf{Round Robin} evens out waiting time between processes by
+        time-slicing the CPU. Very small quanta approach ideal processor
+        sharing (best average turnaround in our experiments) at the cost of
+        more context switches; very large quanta degenerate toward FIFO.
+        The best quantum is workload-dependent, so it is worth tuning quantum
+        to the typical CPU-burst length in the system.
+  \item \textbf{MLFQ} adapts to each process's observed behaviour (I/O-bound
+        processes stay near the top, CPU-bound processes sink to the
+        bottom) without any prior knowledge of burst lengths. Its main
+        weakness is potential starvation of demoted, CPU-bound processes;
+        a periodic priority boost (every 20 time units in our study) is a
+        simple, effective way to fix this and gave a small but consistent
+        reduction in average turnaround time on a single CPU.
+  \item \textbf{Adding a second processor} improves every algorithm
+        substantially by directly cutting ready-queue waiting time,
+        and it shrinks the performance gap between the different
+        scheduling policies, since with sufficient CPU capacity the
+        scheduling policy matters less than raw availability of a free
+        CPU.
+\end{itemize}
+
+% ============================================================
+\section{Reproducing the Experiments}
+% ============================================================
+The complete source code, a \texttt{Makefile}, and the sample workload
+files used in this report are included with the submission. To build and
+run:
+\begin{lstlisting}
+# builds ./sim_part1 (1 CPU) and ./sim_part2 (2 CPUs)
+make
+
+./sim_part1 FIFO  src/test_cases/process4.txt
+./sim_part1 RR  2 src/test_cases/process4.txt
+./sim_part1 MLFQ 20 src/test_cases/process4.txt
+
+./sim_part2 FIFO  src/test_cases/process4.txt
+./sim_part2 RR  2 src/test_cases/process4.txt
+./sim_part2 MLFQ 20 src/test_cases/process4.txt
+\end{lstlisting}
+Each invocation prints the schedule (per CPU) followed by the
+\texttt{Final Results} block containing per-process turnaround time,
+average turnaround time, maximum turnaround time, and simulator run time.
+
+\end{document}
