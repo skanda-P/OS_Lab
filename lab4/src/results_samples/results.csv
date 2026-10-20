@@ -1,0 +1,1 @@
+trace,pt,tlb,frames_cap,accesses,distinct_pages,frames_used,cycles,pt_util,hash,tlb_hits,tlb_misses,tlb_hit_rate,faults,repl_faults,fault_rate,sim_seconds
