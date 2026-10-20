@@ -33,19 +33,19 @@ for TRACE in "$TRACE_DIR"/*.txt; do
 
     for PT in single two; do
         # Part I & II: Unlimited frames, No TLB
-        ./memsim --trace "$TRACE" --pt "$PT" --csv --hist "$HIST_DIR/${TRACE_NAME}.${PT}.csv" >> "$OUTPUT_CSV"
+        ./main --trace "$TRACE" --pt "$PT" --csv --hist "$HIST_DIR/${TRACE_NAME}.${PT}.csv" >> "$OUTPUT_CSV"
 
         # Part III: Unlimited frames, With TLB
-        ./memsim --trace "$TRACE" --pt "$PT" --tlb --csv >> "$OUTPUT_CSV"
+        ./main --trace "$TRACE" --pt "$PT" --tlb --csv >> "$OUTPUT_CSV"
 
         # Part IV: Bounded memory (fractional sizes of 2^20)
         for FRAC in 0.5 0.25 0.125 0.0625; do
-            ./memsim --trace "$TRACE" --pt "$PT" --tlb --frames-frac "$FRAC" --csv >> "$OUTPUT_CSV"
+            ./main --trace "$TRACE" --pt "$PT" --tlb --frames-frac "$FRAC" --csv >> "$OUTPUT_CSV"
         done
 
         # Part IV: Bounded memory (small absolute frame limits)
         for FRAMES in 4096 1024 256 64 16; do
-            ./memsim --trace "$TRACE" --pt "$PT" --tlb --frames "$FRAMES" --csv >> "$OUTPUT_CSV"
+            ./main --trace "$TRACE" --pt "$PT" --tlb --frames "$FRAMES" --csv >> "$OUTPUT_CSV"
         done
     done
 done

@@ -1,7 +1,7 @@
 CXX      ?= g++
 CXXFLAGS ?= -O3 -march=native -std=c++17 -Wall -Wextra
 
-TARGET   = memsim
+TARGET   = main
 SRCS     = main.cpp
 
 all: $(TARGET)

@@ -1,13 +1,5 @@
-// ============================================================================
-// CS Memory Virtualization Simulator (Laboratory 4)
-//
-// Covers all five parts of the assignment in a single, self-contained file:
-//   Part I   : Single-Level Page Table & Free Frame Management (Bump Allocator)
-//   Part II  : Two-Level Page Table & Verification of Frame Hash Consistency
-//   Part III : 128-Entry Fully-Associative TLB with Exact LRU Policy
-//   Part IV  : Bounded Physical Memory with LRU Page Replacement & Disk Penalty
-//   Part V   : High-Performance Simulation Loop & Runtime Measurement
-// ============================================================================
+// Memory management simulator for Lab 4.
+// It models page translation, TLB behavior, page replacement, and hot-page analysis.
 
 #include <algorithm>
 #include <chrono>
@@ -18,27 +10,21 @@
 #include <string>
 #include <vector>
 
-// ============================================================================
-// SECTION 1: ARCHITECTURAL CONSTANTS AND SYSTEM CONFIGURATION
-// ============================================================================
+// System parameters that define the virtual address space and the simulator cost model.
+constexpr uint32_t PAGE_OFFSET_BITS     = 12;
+constexpr uint32_t PAGE_SIZE_BYTES      = 1u << PAGE_OFFSET_BITS;
+constexpr uint32_t VPN_BITS             = 32 - PAGE_OFFSET_BITS;
+constexpr uint32_t TOTAL_VIRTUAL_PAGES  = 1u << VPN_BITS;
+constexpr uint32_t INVALID_FRAME        = 0xFFFFFFFFu;
 
-// Memory Architecture: 32-bit Virtual Address, 4 KB Page Size
-constexpr uint32_t PAGE_OFFSET_BITS     = 12;                             // 12 bits for 4 KB offset (2^12 = 4096)
-constexpr uint32_t PAGE_SIZE_BYTES      = 1u << PAGE_OFFSET_BITS;         // 4096 bytes per page
-constexpr uint32_t VPN_BITS             = 32 - PAGE_OFFSET_BITS;          // 20 bits for Virtual Page Number (VPN)
-constexpr uint32_t TOTAL_VIRTUAL_PAGES  = 1u << VPN_BITS;                 // 2^20 = 1,048,576 virtual pages
-constexpr uint32_t INVALID_FRAME        = 0xFFFFFFFFu;                    // Sentinel value indicating unmapped/empty
+constexpr uint64_t TLB_ACCESS_CYCLES    = 1;
+constexpr uint64_t MEMORY_ACCESS_CYCLES = 200;
+constexpr uint64_t DISK_ACCESS_CYCLES   = 20000000ULL;
 
-// Cycle Cost Model (as specified in assignment instructions)
-constexpr uint64_t TLB_ACCESS_CYCLES    = 1;                              // 1 cycle for TLB lookup
-constexpr uint64_t MEMORY_ACCESS_CYCLES = 200;                            // 200 cycles per main memory access
-constexpr uint64_t DISK_ACCESS_CYCLES   = 20000000ULL;                    // 20,000,000 cycles for page replacement
-
-// 64-bit FNV-1a Hash Constants for Metric E: H = (H ^ frame_number) * PRIME
 constexpr uint64_t FNV_PRIME            = 1099511628211ULL;
 constexpr uint64_t FNV_OFFSET_BASIS     = 1469598103934665603ULL;
 
-// Simulator Command-Line Options
+// Command-line options provided to the simulator.
 struct SimulatorConfig {
     std::string trace_file_path;
     std::string page_table_type   = "single"; // "single" or "two"
@@ -50,7 +36,7 @@ struct SimulatorConfig {
     bool        csv_mode          = false;    // Concise single-line output for batch script
 };
 
-// Simulation Execution Metrics & Final Results
+// Aggregated execution metrics collected during a run.
 struct SimulationResults {
     uint64_t total_requests       = 0;
     uint64_t instruction_requests = 0;
@@ -82,351 +68,215 @@ struct SimulationResults {
     std::vector<uint64_t> page_access_counts;
 };
 
-// ============================================================================
-// SECTION 2: PAGE TABLE IMPLEMENTATIONS (PARTS I & II)
-// ============================================================================
-
-// ----------------------------------------------------------------------------
-// SingleLevelPageTable (Part I)
-// - Simple flat array of 2^20 entries indexed directly by VPN (size = 4 MiB).
-// - Each translation requires exactly 1 memory access (200 cycles).
-// ----------------------------------------------------------------------------
-class SingleLevelPageTable {
-public:
-    static constexpr int PAGE_WALK_LEVELS = 1;
-
-private:
+// Plain data structures used by the page tables, physical memory, and TLB.
+struct SingleLevelPageTable {
     std::vector<uint32_t> entries;
-
-public:
-    SingleLevelPageTable() : entries(TOTAL_VIRTUAL_PAGES, INVALID_FRAME) {}
-
-    // Lookup virtual page. Returns physical frame number (PFN) or INVALID_FRAME.
-    inline uint32_t lookup(uint32_t vpn) const {
-        return entries[vpn];
-    }
-
-    // Map virtual page to physical frame.
-    inline void map(uint32_t vpn, uint32_t frame_number) {
-        entries[vpn] = frame_number;
-    }
-
-    // Unmap virtual page when it is evicted to disk.
-    inline void unmap(uint32_t vpn) {
-        entries[vpn] = INVALID_FRAME;
-    }
-
-    // Metric D: Total allocated page table entries (always 2^20 in a flat table).
-    uint64_t allocated_entries() const {
-        return TOTAL_VIRTUAL_PAGES;
-    }
-
-    // Metric D: Extra directory entries accessed (0 for single-level).
-    uint64_t extra_accessed_entries() const {
-        return 0;
-    }
 };
 
-// ----------------------------------------------------------------------------
-// TwoLevelPageTable (Part II)
-// - 32-bit address split:
-//     * L1 Page Directory Index : bits 31..22 (10 bits -> 1024 entries)
-//     * L2 Page Table Index     : bits 21..12 (10 bits -> 1024 entries per table)
-//     * Page Offset             : bits 11..0  (12 bits -> 4096 bytes)
-// - L2 tables are allocated lazily only when a page within that 4 MB range is used.
-// - Each translation requires 2 memory accesses (L1 lookup + L2 lookup = 400 cycles).
-// ----------------------------------------------------------------------------
-class TwoLevelPageTable {
-public:
-    static constexpr int PAGE_WALK_LEVELS = 2;
-
-private:
-    static constexpr uint32_t L1_SIZE = 1024;
-    static constexpr uint32_t L2_SIZE = 1024;
-
+struct TwoLevelPageTable {
     std::vector<uint32_t*> l1_directory;
-    uint64_t l2_tables_created = 0;
-
-public:
-    TwoLevelPageTable() : l1_directory(L1_SIZE, nullptr) {}
-
-    // Clean up all dynamically allocated L2 tables on destruction
-    ~TwoLevelPageTable() {
-        for (uint32_t* l2_table : l1_directory) {
-            delete[] l2_table;
-        }
-    }
-
-    // Prevent accidental copying
-    TwoLevelPageTable(const TwoLevelPageTable&) = delete;
-    TwoLevelPageTable& operator=(const TwoLevelPageTable&) = delete;
-
-    // Lookup VPN: checks L1 pointer first, then reads L2 table entry.
-    inline uint32_t lookup(uint32_t vpn) const {
-        const uint32_t l1_index = vpn >> 10;
-        const uint32_t* l2_table = l1_directory[l1_index];
-        if (!l2_table) return INVALID_FRAME;
-        return l2_table[vpn & 0x3FF];
-    }
-
-    // Map VPN to physical frame. Dynamically creates the L2 table if not present.
-    inline void map(uint32_t vpn, uint32_t frame_number) {
-        const uint32_t l1_index = vpn >> 10;
-        uint32_t*& l2_table = l1_directory[l1_index];
-        if (!l2_table) {
-            l2_table = new uint32_t[L2_SIZE];
-            std::fill(l2_table, l2_table + L2_SIZE, INVALID_FRAME);
-            ++l2_tables_created;
-        }
-        l2_table[vpn & 0x3FF] = frame_number;
-    }
-
-    // Unmap virtual page when evicted.
-    inline void unmap(uint32_t vpn) {
-        const uint32_t l1_index = vpn >> 10;
-        uint32_t* l2_table = l1_directory[l1_index];
-        if (l2_table) {
-            l2_table[vpn & 0x3FF] = INVALID_FRAME;
-        }
-    }
-
-    // Metric D: Allocated entries = 1024 L1 entries + (1024 * number of active L2 tables)
-    uint64_t allocated_entries() const {
-        return L1_SIZE + (l2_tables_created * L2_SIZE);
-    }
-
-    // Metric D: Each active L2 table was reached through exactly 1 active L1 entry
-    uint64_t extra_accessed_entries() const {
-        return l2_tables_created;
-    }
+    uint64_t l2_tables_created;
 };
 
-// ============================================================================
-// SECTION 3: PHYSICAL MEMORY & LRU FRAME REPLACEMENT (PARTS I & IV)
-// ============================================================================
-
-// ----------------------------------------------------------------------------
-// PhysicalMemoryManager
-//
-// Free Frame Management Scheme:
-// 1. Initial State: All physical frames are free.
-// 2. Sequential "Bump" Allocator: Free frames are handed out in increasing
-//    order (0, 1, 2, ...) as distinct virtual pages are touched for the first time.
-//    Because frame numbers depend solely on access sequence, single-level and
-//    two-level page tables produce the EXACT SAME frame sequence and hash!
-// 3. LRU Replacement List (Part IV):
-//    - Tracks frame recency with an O(1) doubly-linked list:
-//        * head_mru: Most Recently Used frame
-//        * tail_lru: Least Recently Used frame
-//    - When physical memory is full, the tail frame (LRU) is evicted and
-//      reused directly for the incoming page.
-// ----------------------------------------------------------------------------
-class PhysicalMemoryManager {
-private:
-    static constexpr uint32_t NULL_NODE = 0xFFFFFFFFu;
-
+struct PhysicalMemoryManager {
     uint32_t capacity;
     uint32_t used_frames_count;
     uint32_t head_mru;
     uint32_t tail_lru;
-
-    std::vector<uint32_t> frame_to_vpn;  // Tracks which virtual page owns each frame
-    std::vector<uint32_t> list_prev;     // Doubly-linked list previous pointers
-    std::vector<uint32_t> list_next;     // Doubly-linked list next pointers
-
-    // Unlink a frame from anywhere in the doubly-linked list
-    inline void unlink_frame(uint32_t f) {
-        if (list_prev[f] != NULL_NODE) {
-            list_next[list_prev[f]] = list_next[f];
-        } else {
-            head_mru = list_next[f];
-        }
-
-        if (list_next[f] != NULL_NODE) {
-            list_prev[list_next[f]] = list_prev[f];
-        } else {
-            tail_lru = list_prev[f];
-        }
-    }
-
-    // Push a frame to the front of the list (marking it Most Recently Used)
-    inline void push_mru_front(uint32_t f) {
-        list_prev[f] = NULL_NODE;
-        list_next[f] = head_mru;
-        if (head_mru != NULL_NODE) {
-            list_prev[head_mru] = f;
-        } else {
-            tail_lru = f;
-        }
-        head_mru = f;
-    }
-
-public:
-    explicit PhysicalMemoryManager(uint32_t cap)
-        : capacity(cap),
-          used_frames_count(0),
-          head_mru(NULL_NODE),
-          tail_lru(NULL_NODE),
-          frame_to_vpn(cap, INVALID_FRAME),
-          list_prev(cap, NULL_NODE),
-          list_next(cap, NULL_NODE) {}
-
-    // Update recency: move frame to MRU position (called on every access)
-    inline void touch_frame(uint32_t frame_number) {
-        if (frame_number == head_mru) return;
-        unlink_frame(frame_number);
-        push_mru_front(frame_number);
-    }
-
-    // Allocate a frame for incoming VPN:
-    // - If free space remains: hands out used_frames_count++, evicted_vpn = INVALID_FRAME
-    // - If memory is full: evicts tail_lru, returns evicted_vpn for unmapping & disk penalty
-    inline uint32_t allocate_frame(uint32_t vpn, uint32_t& evicted_vpn) {
-        uint32_t allocated_frame;
-
-        if (used_frames_count < capacity) {
-            allocated_frame = used_frames_count++;
-            evicted_vpn = INVALID_FRAME; // No page evicted (first touches are free)
-        } else {
-            allocated_frame = tail_lru;  // Pick least recently used frame
-            evicted_vpn = frame_to_vpn[allocated_frame];
-            unlink_frame(allocated_frame);
-        }
-
-        frame_to_vpn[allocated_frame] = vpn;
-        push_mru_front(allocated_frame);
-        return allocated_frame;
-    }
-
-    uint32_t get_used_frames() const { return used_frames_count; }
+    std::vector<uint32_t> frame_to_vpn;
+    std::vector<uint32_t> list_prev;
+    std::vector<uint32_t> list_next;
 };
 
-// ============================================================================
-// SECTION 4: TRANSLATION LOOKASIDE BUFFER (TLB) (PART III)
-// ============================================================================
-
-// ----------------------------------------------------------------------------
-// TranslationLookasideBuffer
-// - 128 entries, fully associative, exact LRU policy, empty at start.
-// - 1 cycle lookup cost.
-// - In hardware, 128 entries are compared in parallel. In software simulation,
-//   scanning 128 entries sequentially per access is slow. A 1 MB direct-index
-//   table `vpn_to_slot[vpn]` provides O(1) lookup while the 128-entry doubly-
-//   linked list preserves exact LRU replacement behavior.
-// ----------------------------------------------------------------------------
-class TranslationLookasideBuffer {
-public:
-    static constexpr int CAPACITY = 128;
-
-private:
-    static constexpr uint8_t EMPTY_SLOT = 255;
-
-    uint32_t cached_vpn[CAPACITY];
-    uint32_t cached_pfn[CAPACITY];
-    uint8_t  prev_slot[CAPACITY];
-    uint8_t  next_slot[CAPACITY];
-
-    uint8_t head_mru = EMPTY_SLOT;
-    uint8_t tail_lru = EMPTY_SLOT;
-
-    uint8_t free_slots[CAPACITY];
-    int     free_count;
-
-    // Fast O(1) lookup map from VPN to TLB slot index (0..127 or EMPTY_SLOT)
+struct TranslationLookasideBuffer {
+    uint32_t cached_vpn[128];
+    uint32_t cached_pfn[128];
+    uint8_t prev_slot[128];
+    uint8_t next_slot[128];
+    uint8_t head_mru;
+    uint8_t tail_lru;
+    uint8_t free_slots[128];
+    int free_count;
     std::vector<uint8_t> vpn_to_slot;
-
-    inline void unlink_slot(uint8_t slot) {
-        if (prev_slot[slot] != EMPTY_SLOT) {
-            next_slot[prev_slot[slot]] = next_slot[slot];
-        } else {
-            head_mru = next_slot[slot];
-        }
-
-        if (next_slot[slot] != EMPTY_SLOT) {
-            prev_slot[next_slot[slot]] = prev_slot[slot];
-        } else {
-            tail_lru = prev_slot[slot];
-        }
-    }
-
-    inline void push_mru_slot(uint8_t slot) {
-        prev_slot[slot] = EMPTY_SLOT;
-        next_slot[slot] = head_mru;
-        if (head_mru != EMPTY_SLOT) {
-            prev_slot[head_mru] = slot;
-        } else {
-            tail_lru = slot;
-        }
-        head_mru = slot;
-    }
-
-public:
-    TranslationLookasideBuffer()
-        : free_count(CAPACITY), vpn_to_slot(TOTAL_VIRTUAL_PAGES, EMPTY_SLOT) {
-        for (int i = 0; i < CAPACITY; ++i) {
-            free_slots[i] = static_cast<uint8_t>(CAPACITY - 1 - i);
-            cached_vpn[i] = 0;
-            cached_pfn[i] = INVALID_FRAME;
-            prev_slot[i]  = EMPTY_SLOT;
-            next_slot[i]  = EMPTY_SLOT;
-        }
-    }
-
-    // Lookup VPN: returns PFN on hit (and moves entry to MRU); returns INVALID_FRAME on miss
-    inline uint32_t lookup(uint32_t vpn) {
-        uint8_t slot = vpn_to_slot[vpn];
-        if (slot == EMPTY_SLOT) return INVALID_FRAME;
-
-        // On hit: move entry to MRU
-        if (slot != head_mru) {
-            unlink_slot(slot);
-            push_mru_slot(slot);
-        }
-        return cached_pfn[slot];
-    }
-
-    // Insert translation after a page table walk
-    inline void insert(uint32_t vpn, uint32_t pfn) {
-        uint8_t slot;
-        if (free_count > 0) {
-            slot = free_slots[--free_count];
-        } else {
-            // Evict LRU entry from tail
-            slot = tail_lru;
-            unlink_slot(slot);
-            vpn_to_slot[cached_vpn[slot]] = EMPTY_SLOT; // Invalidate old mapping
-        }
-
-        cached_vpn[slot] = vpn;
-        cached_pfn[slot] = pfn;
-        vpn_to_slot[vpn] = slot;
-        push_mru_slot(slot);
-    }
-
-    // Invalidate entry when page is evicted from physical memory in Part IV
-    inline void invalidate(uint32_t vpn) {
-        uint8_t slot = vpn_to_slot[vpn];
-        if (slot == EMPTY_SLOT) return;
-
-        vpn_to_slot[vpn] = EMPTY_SLOT;
-        unlink_slot(slot);
-        free_slots[free_count++] = slot;
-    }
 };
 
-// ============================================================================
-// SECTION 5: FAST TRACE PARSER AND BUFFERED I/O
-// ============================================================================
+void initialize_single_page_table(SingleLevelPageTable& table) {
+    table.entries.assign(TOTAL_VIRTUAL_PAGES, INVALID_FRAME);
+}
 
-// Parses one line: "<address>,<I/D>,<R/W>"
-// Handles both decimal addresses (used by official benchmarks) and hexadecimal (with/without 0x)
-static inline bool parse_trace_line(const char* start, const char* end,
-                                    uint32_t& address, char& type, char& rw) {
-    // Skip leading whitespace
+uint32_t lookup_single_page(SingleLevelPageTable& table, uint32_t vpn) {
+    return table.entries[vpn];
+}
+
+void map_single_page(SingleLevelPageTable& table, uint32_t vpn, uint32_t frame) {
+    table.entries[vpn] = frame;
+}
+
+void unmap_single_page(SingleLevelPageTable& table, uint32_t vpn) {
+    table.entries[vpn] = INVALID_FRAME;
+}
+
+void initialize_two_level_page_table(TwoLevelPageTable& table) {
+    table.l1_directory.assign(1024, nullptr);
+    table.l2_tables_created = 0;
+}
+
+void destroy_two_level_page_table(TwoLevelPageTable& table) {
+    for (uint32_t* l2_table : table.l1_directory) {
+        delete[] l2_table;
+    }
+}
+
+uint32_t lookup_two_level_page(TwoLevelPageTable& table, uint32_t vpn) {
+    uint32_t* l2_table = table.l1_directory[vpn >> 10];
+    if (!l2_table) return INVALID_FRAME;
+    return l2_table[vpn & 0x3FF];
+}
+
+void map_two_level_page(TwoLevelPageTable& table, uint32_t vpn, uint32_t frame) {
+    uint32_t*& l2_table = table.l1_directory[vpn >> 10];
+    if (!l2_table) {
+        l2_table = new uint32_t[1024];
+        std::fill(l2_table, l2_table + 1024, INVALID_FRAME);
+        ++table.l2_tables_created;
+    }
+    l2_table[vpn & 0x3FF] = frame;
+}
+
+void unmap_two_level_page(TwoLevelPageTable& table, uint32_t vpn) {
+    uint32_t* l2_table = table.l1_directory[vpn >> 10];
+    if (l2_table) l2_table[vpn & 0x3FF] = INVALID_FRAME;
+}
+
+void initialize_memory_manager(PhysicalMemoryManager& memory, uint32_t capacity) {
+    memory.capacity = capacity;
+    memory.used_frames_count = 0;
+    memory.head_mru = INVALID_FRAME;
+    memory.tail_lru = INVALID_FRAME;
+    memory.frame_to_vpn.assign(capacity, INVALID_FRAME);
+    memory.list_prev.assign(capacity, INVALID_FRAME);
+    memory.list_next.assign(capacity, INVALID_FRAME);
+}
+
+void unlink_frame(PhysicalMemoryManager& memory, uint32_t frame) {
+    if (memory.list_prev[frame] != INVALID_FRAME)
+        memory.list_next[memory.list_prev[frame]] = memory.list_next[frame];
+    else
+        memory.head_mru = memory.list_next[frame];
+
+    if (memory.list_next[frame] != INVALID_FRAME)
+        memory.list_prev[memory.list_next[frame]] = memory.list_prev[frame];
+    else
+        memory.tail_lru = memory.list_prev[frame];
+}
+
+void push_frame_mru(PhysicalMemoryManager& memory, uint32_t frame) {
+    memory.list_prev[frame] = INVALID_FRAME;
+    memory.list_next[frame] = memory.head_mru;
+    if (memory.head_mru != INVALID_FRAME)
+        memory.list_prev[memory.head_mru] = frame;
+    else
+        memory.tail_lru = frame;
+    memory.head_mru = frame;
+}
+
+void touch_frame(PhysicalMemoryManager& memory, uint32_t frame) {
+    if (frame == memory.head_mru) return;
+    unlink_frame(memory, frame);
+    push_frame_mru(memory, frame);
+}
+
+uint32_t allocate_frame(PhysicalMemoryManager& memory, uint32_t vpn,
+                        uint32_t& evicted_vpn) {
+    uint32_t frame;
+    if (memory.used_frames_count < memory.capacity) {
+        frame = memory.used_frames_count++;
+        evicted_vpn = INVALID_FRAME;
+    } else {
+        frame = memory.tail_lru;
+        evicted_vpn = memory.frame_to_vpn[frame];
+        unlink_frame(memory, frame);
+    }
+    memory.frame_to_vpn[frame] = vpn;
+    push_frame_mru(memory, frame);
+    return frame;
+}
+
+void initialize_tlb(TranslationLookasideBuffer& tlb) {
+    tlb.head_mru = 255;
+    tlb.tail_lru = 255;
+    tlb.free_count = 128;
+    tlb.vpn_to_slot.assign(TOTAL_VIRTUAL_PAGES, 255);
+    for (int i = 0; i < 128; ++i) {
+        tlb.free_slots[i] = static_cast<uint8_t>(127 - i);
+        tlb.cached_vpn[i] = 0;
+        tlb.cached_pfn[i] = INVALID_FRAME;
+        tlb.prev_slot[i] = 255;
+        tlb.next_slot[i] = 255;
+    }
+}
+
+void unlink_tlb_slot(TranslationLookasideBuffer& tlb, uint8_t slot) {
+    if (tlb.prev_slot[slot] != 255)
+        tlb.next_slot[tlb.prev_slot[slot]] = tlb.next_slot[slot];
+    else
+        tlb.head_mru = tlb.next_slot[slot];
+
+    if (tlb.next_slot[slot] != 255)
+        tlb.prev_slot[tlb.next_slot[slot]] = tlb.prev_slot[slot];
+    else
+        tlb.tail_lru = tlb.prev_slot[slot];
+}
+
+void push_tlb_slot_mru(TranslationLookasideBuffer& tlb, uint8_t slot) {
+    tlb.prev_slot[slot] = 255;
+    tlb.next_slot[slot] = tlb.head_mru;
+    if (tlb.head_mru != 255)
+        tlb.prev_slot[tlb.head_mru] = slot;
+    else
+        tlb.tail_lru = slot;
+    tlb.head_mru = slot;
+}
+
+uint32_t lookup_tlb(TranslationLookasideBuffer& tlb, uint32_t vpn) {
+    uint8_t slot = tlb.vpn_to_slot[vpn];
+    if (slot == 255) return INVALID_FRAME;
+    if (slot != tlb.head_mru) {
+        unlink_tlb_slot(tlb, slot);
+        push_tlb_slot_mru(tlb, slot);
+    }
+    return tlb.cached_pfn[slot];
+}
+
+void insert_tlb(TranslationLookasideBuffer& tlb, uint32_t vpn, uint32_t pfn) {
+    uint8_t slot;
+    if (tlb.free_count > 0) {
+        slot = tlb.free_slots[--tlb.free_count];
+    } else {
+        slot = tlb.tail_lru;
+        unlink_tlb_slot(tlb, slot);
+        tlb.vpn_to_slot[tlb.cached_vpn[slot]] = 255;
+    }
+    tlb.cached_vpn[slot] = vpn;
+    tlb.cached_pfn[slot] = pfn;
+    tlb.vpn_to_slot[vpn] = slot;
+    push_tlb_slot_mru(tlb, slot);
+}
+
+void invalidate_tlb(TranslationLookasideBuffer& tlb, uint32_t vpn) {
+    uint8_t slot = tlb.vpn_to_slot[vpn];
+    if (slot == 255) return;
+    tlb.vpn_to_slot[vpn] = 255;
+    unlink_tlb_slot(tlb, slot);
+    tlb.free_slots[tlb.free_count++] = slot;
+}
+
+// Parses a single trace record in the form "address,I/R" or "address,D/W".
+bool parse_trace_line(const char* start, const char* end,
+                      uint32_t& address, char& type, char& rw) {
     while (start < end && (*start == ' ' || *start == '\t')) ++start;
-    if (start >= end || *start == '<') return false; // Skips header like <address>...
+    if (start >= end || *start == '<') return false;
 
-    // Determine if address is hexadecimal or decimal
     bool is_hex = false;
     if (end - start >= 2 && start[0] == '0' && (start[1] == 'x' || start[1] == 'X')) {
         is_hex = true;
@@ -472,7 +322,6 @@ static inline bool parse_trace_line(const char* start, const char* end,
     type = '?';
     rw = '?';
 
-    // Parse I/D and R/W fields
     if (start < end && *start == ',') {
         ++start;
         while (start < end && *start == ' ') ++start;
@@ -488,45 +337,8 @@ static inline bool parse_trace_line(const char* start, const char* end,
     return true;
 }
 
-// Reads file in large 4 MiB chunks to maximize simulator throughput (Part V)
-template <typename LineProcessor>
-static void read_trace_chunked(FILE* file, LineProcessor&& process_line) {
-    constexpr size_t BUFFER_CHUNK_SIZE = 4 * 1024 * 1024; // 4 MiB buffer
-    std::vector<char> buffer(BUFFER_CHUNK_SIZE * 2);
-    char* base = buffer.data();
-    size_t leftover_bytes = 0;
-
-    while (true) {
-        size_t bytes_read = fread(base + leftover_bytes, 1, BUFFER_CHUNK_SIZE, file);
-        size_t total_bytes = leftover_bytes + bytes_read;
-        size_t line_start = 0;
-
-        while (true) {
-            char* newline_ptr = static_cast<char*>(memchr(base + line_start, '\n', total_bytes - line_start));
-            if (!newline_ptr) break;
-
-            if (!process_line(base + line_start, newline_ptr)) return;
-            line_start = static_cast<size_t>(newline_ptr - base) + 1;
-        }
-
-        if (bytes_read == 0) {
-            if (line_start < total_bytes) {
-                process_line(base + line_start, base + total_bytes);
-            }
-            return;
-        }
-
-        leftover_bytes = total_bytes - line_start;
-        memmove(base, base + line_start, leftover_bytes);
-    }
-}
-
-// ============================================================================
-// SECTION 6: CORE SIMULATION ENGINE (TEMPLATED FOR MAXIMUM SPEED)
-// ============================================================================
-
-template <typename PageTableClass, bool UseTLB>
-static bool execute_simulation(const SimulatorConfig& cfg, SimulationResults& res) {
+// Executes the simulation using either the single-level or two-level page table.
+bool execute_simulation(const SimulatorConfig& cfg, SimulationResults& res) {
     FILE* trace_file = fopen(cfg.trace_file_path.c_str(), "rb");
     if (!trace_file) {
         perror("Error opening trace file");
@@ -542,9 +354,14 @@ static bool execute_simulation(const SimulatorConfig& cfg, SimulationResults& re
     }
     res.frame_capacity = capacity;
 
-    PageTableClass              page_table;
-    PhysicalMemoryManager       memory_manager(static_cast<uint32_t>(capacity));
-    TranslationLookasideBuffer  tlb;
+    SingleLevelPageTable single_page_table;
+    TwoLevelPageTable two_page_table;
+    PhysicalMemoryManager memory_manager;
+    TranslationLookasideBuffer tlb;
+    initialize_single_page_table(single_page_table);
+    initialize_two_level_page_table(two_page_table);
+    initialize_memory_manager(memory_manager, static_cast<uint32_t>(capacity));
+    initialize_tlb(tlb);
 
     res.page_access_counts.assign(TOTAL_VIRTUAL_PAGES, 0);
     uint64_t* access_counts = res.page_access_counts.data();
@@ -563,11 +380,14 @@ static bool execute_simulation(const SimulatorConfig& cfg, SimulationResults& re
 
     auto start_time = std::chrono::steady_clock::now();
 
-    read_trace_chunked(trace_file, [&](const char* start, const char* end) -> bool {
+    char line[256];
+    while (fgets(line, sizeof(line), trace_file)) {
+        const char* start = line;
+        const char* end = line + strlen(line);
         uint32_t address;
         char type, rw;
-        if (!parse_trace_line(start, end, address, type, rw)) return true;
-        if (max_reqs && total_requests >= max_reqs) return false;
+        if (!parse_trace_line(start, end, address, type, rw)) continue;
+        if (max_reqs && total_requests >= max_reqs) break;
 
         ++total_requests;
         instr_count += (type == 'I');
@@ -582,78 +402,90 @@ static bool execute_simulation(const SimulatorConfig& cfg, SimulationResults& re
 
         uint32_t pfn = INVALID_FRAME;
 
-        // --------------------------------------------------------------------
-        // Step 1: Address Translation (TLB or Page Walk)
-        // --------------------------------------------------------------------
-        if constexpr (UseTLB) {
-            cycles += TLB_ACCESS_CYCLES; // 1 cycle TLB lookup
-            pfn = tlb.lookup(vpn);
+        // Address translation: either a TLB hit or a full page-table walk.
+        if (cfg.enable_tlb) {
+            cycles += TLB_ACCESS_CYCLES;
+            pfn = lookup_tlb(tlb, vpn);
         }
 
-        if constexpr (UseTLB) {
+        if (cfg.enable_tlb) {
             if (pfn != INVALID_FRAME) {
-                // TLB Hit: update physical frame recency in O(1)
                 ++tlb_hits;
-                memory_manager.touch_frame(pfn);
+                touch_frame(memory_manager, pfn);
             } else {
-                // TLB Miss: page walk required
                 ++tlb_misses;
-                cycles += static_cast<uint64_t>(PageTableClass::PAGE_WALK_LEVELS) * MEMORY_ACCESS_CYCLES;
-                pfn = page_table.lookup(vpn);
+                cycles += static_cast<uint64_t>(cfg.page_table_type == "single" ? 1 : 2) *
+                          MEMORY_ACCESS_CYCLES;
+                if (cfg.page_table_type == "single") {
+                    pfn = lookup_single_page(single_page_table, vpn);
+                } else {
+                    pfn = lookup_two_level_page(two_page_table, vpn);
+                }
 
                 if (pfn == INVALID_FRAME) {
-                    // Page Fault: allot frame
                     ++page_faults;
                     uint32_t evicted_vpn;
-                    pfn = memory_manager.allocate_frame(vpn, evicted_vpn);
+                    pfn = allocate_frame(memory_manager, vpn, evicted_vpn);
 
                     if (evicted_vpn != INVALID_FRAME) {
-                        // Replacement occurred: evict old page from PT and TLB
-                        page_table.unmap(evicted_vpn);
-                        tlb.invalidate(evicted_vpn);
-                        cycles += DISK_ACCESS_CYCLES; // 20M cycle disk penalty
+                        if (cfg.page_table_type == "single") {
+                            unmap_single_page(single_page_table, evicted_vpn);
+                        } else {
+                            unmap_two_level_page(two_page_table, evicted_vpn);
+                        }
+                        invalidate_tlb(tlb, evicted_vpn);
+                        cycles += DISK_ACCESS_CYCLES;
                         ++replacement_faults;
                     }
-                    page_table.map(vpn, pfn);
+                    if (cfg.page_table_type == "single") {
+                        map_single_page(single_page_table, vpn, pfn);
+                    } else {
+                        map_two_level_page(two_page_table, vpn, pfn);
+                    }
                 } else {
-                    memory_manager.touch_frame(pfn);
+                    touch_frame(memory_manager, pfn);
                 }
-                // Install newly translated mapping into TLB
-                tlb.insert(vpn, pfn);
+                insert_tlb(tlb, vpn, pfn);
             }
         } else {
-            // No TLB: always execute page table walk
-            cycles += static_cast<uint64_t>(PageTableClass::PAGE_WALK_LEVELS) * MEMORY_ACCESS_CYCLES;
-            pfn = page_table.lookup(vpn);
+            cycles += static_cast<uint64_t>(cfg.page_table_type == "single" ? 1 : 2) *
+                      MEMORY_ACCESS_CYCLES;
+            if (cfg.page_table_type == "single") {
+                pfn = lookup_single_page(single_page_table, vpn);
+            } else {
+                pfn = lookup_two_level_page(two_page_table, vpn);
+            }
 
             if (pfn == INVALID_FRAME) {
-                // Page Fault: allot frame
                 ++page_faults;
                 uint32_t evicted_vpn;
-                pfn = memory_manager.allocate_frame(vpn, evicted_vpn);
+                pfn = allocate_frame(memory_manager, vpn, evicted_vpn);
 
                 if (evicted_vpn != INVALID_FRAME) {
-                    page_table.unmap(evicted_vpn);
+                    if (cfg.page_table_type == "single") {
+                        unmap_single_page(single_page_table, evicted_vpn);
+                    } else {
+                        unmap_two_level_page(two_page_table, evicted_vpn);
+                    }
                     cycles += DISK_ACCESS_CYCLES;
                     ++replacement_faults;
                 }
-                page_table.map(vpn, pfn);
+                if (cfg.page_table_type == "single") {
+                    map_single_page(single_page_table, vpn, pfn);
+                } else {
+                    map_two_level_page(two_page_table, vpn, pfn);
+                }
             } else {
-                memory_manager.touch_frame(pfn);
+                touch_frame(memory_manager, pfn);
             }
         }
 
-        // --------------------------------------------------------------------
-        // Step 2: The actual data or instruction memory access takes 200 cycles
-        // --------------------------------------------------------------------
+        // Every memory request also incurs the normal memory access latency.
         cycles += MEMORY_ACCESS_CYCLES;
 
-        // --------------------------------------------------------------------
-        // Step 3: Metric E Hash Update: H = f(H, frame_number)
-        // --------------------------------------------------------------------
+        // Update the frame-hash metric used to compare page-table implementations.
         hash = (hash ^ static_cast<uint64_t>(pfn)) * FNV_PRIME;
-        return true;
-    });
+    }
 
     auto end_time = std::chrono::steady_clock::now();
     fclose(trace_file);
@@ -672,18 +504,21 @@ static bool execute_simulation(const SimulatorConfig& cfg, SimulationResults& re
     res.tlb_misses           = tlb_misses;
     res.page_faults          = page_faults;
     res.replacement_faults   = replacement_faults;
-    res.frames_used          = memory_manager.get_used_frames();
-    res.pt_allocated_entries = page_table.allocated_entries();
-    res.pt_accessed_entries  = distinct_pages + page_table.extra_accessed_entries();
+    res.frames_used = memory_manager.used_frames_count;
+    if (cfg.page_table_type == "single") {
+        res.pt_allocated_entries = TOTAL_VIRTUAL_PAGES;
+        res.pt_accessed_entries  = distinct_pages;
+    } else {
+        res.pt_allocated_entries = 1024 + (two_page_table.l2_tables_created * 1024);
+        res.pt_accessed_entries  = distinct_pages + two_page_table.l2_tables_created;
+    }
 
+    destroy_two_level_page_table(two_page_table);
     return true;
 }
 
-// ============================================================================
-// SECTION 7: HOT-PAGE DISTRIBUTION ANALYSIS (METRIC B)
-// ============================================================================
-
-static void analyze_hot_pages(const SimulationResults& res, const std::string& hist_file, bool quiet) {
+// Summarizes how concentrated the memory accesses are across the touched pages.
+void analyze_hot_pages(const SimulationResults& res, const std::string& hist_file, bool quiet) {
     std::vector<uint64_t> active_counts;
     for (uint64_t cnt : res.page_access_counts) {
         if (cnt > 0) active_counts.push_back(cnt);
@@ -726,11 +561,8 @@ static void analyze_hot_pages(const SimulationResults& res, const std::string& h
     }
 }
 
-// ============================================================================
-// SECTION 8: CLI PARSING AND REPORTING
-// ============================================================================
-
-static void print_help(const char* binary_name) {
+// Prints the command-line usage information for the simulator.
+void print_help(const char* binary_name) {
     fprintf(stderr,
         "Usage: %s --trace <file> [options]\n"
         "Options:\n"
@@ -744,26 +576,29 @@ static void print_help(const char* binary_name) {
         binary_name);
 }
 
+// Returns the value following a command-line option.
+const char* next_argument(int argc, char** argv, int& index) {
+    if (index + 1 >= argc) {
+        print_help(argv[0]);
+        exit(EXIT_FAILURE);
+    }
+    ++index;
+    return argv[index];
+}
+
 int main(int argc, char** argv) {
     SimulatorConfig cfg;
 
     for (int i = 1; i < argc; ++i) {
         std::string flag = argv[i];
-        auto read_value = [&](void) -> const char* {
-            if (i + 1 >= argc) {
-                print_help(argv[0]);
-                exit(EXIT_FAILURE);
-            }
-            return argv[++i];
-        };
 
-        if      (flag == "--trace")       cfg.trace_file_path = read_value();
-        else if (flag == "--pt")          cfg.page_table_type = read_value();
+        if      (flag == "--trace")       cfg.trace_file_path = next_argument(argc, argv, i);
+        else if (flag == "--pt")          cfg.page_table_type = next_argument(argc, argv, i);
         else if (flag == "--tlb")         cfg.enable_tlb = true;
-        else if (flag == "--frames")      cfg.frame_capacity = strtoull(read_value(), nullptr, 10);
-        else if (flag == "--frames-frac") cfg.frame_fraction = atof(read_value());
-        else if (flag == "--max")         cfg.max_requests = strtoull(read_value(), nullptr, 10);
-        else if (flag == "--hist")        cfg.hist_output_file = read_value();
+        else if (flag == "--frames")      cfg.frame_capacity = strtoull(next_argument(argc, argv, i), nullptr, 10);
+        else if (flag == "--frames-frac") cfg.frame_fraction = atof(next_argument(argc, argv, i));
+        else if (flag == "--max")         cfg.max_requests = strtoull(next_argument(argc, argv, i), nullptr, 10);
+        else if (flag == "--hist")        cfg.hist_output_file = next_argument(argc, argv, i);
         else if (flag == "--csv")         cfg.csv_mode = true;
         else {
             print_help(argv[0]);
@@ -779,13 +614,7 @@ int main(int argc, char** argv) {
     SimulationResults results;
     bool status = false;
 
-    if (cfg.page_table_type == "single") {
-        status = cfg.enable_tlb ? execute_simulation<SingleLevelPageTable, true>(cfg, results)
-                                : execute_simulation<SingleLevelPageTable, false>(cfg, results);
-    } else {
-        status = cfg.enable_tlb ? execute_simulation<TwoLevelPageTable, true>(cfg, results)
-                                : execute_simulation<TwoLevelPageTable, false>(cfg, results);
-    }
+    status = execute_simulation(cfg, results);
 
     if (!status) return EXIT_FAILURE;
 
