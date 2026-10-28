@@ -123,6 +123,7 @@ void initialize_two_level_page_table(TwoLevelPageTable& table) {
 
 void destroy_two_level_page_table(TwoLevelPageTable& table) {
     for (uint32_t* l2_table : table.l1_directory) {
+
         delete[] l2_table;
     }
 }
@@ -169,7 +170,7 @@ void unlink_frame(PhysicalMemoryManager& memory, uint32_t frame) {
     else
         memory.tail_lru = memory.list_prev[frame];
 }
-
+ 
 void push_frame_mru(PhysicalMemoryManager& memory, uint32_t frame) {
     memory.list_prev[frame] = INVALID_FRAME;
     memory.list_next[frame] = memory.head_mru;
