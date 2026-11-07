@@ -12,7 +12,7 @@ const int CHUNK_SIZE = 512;
 
 int main(int argc, char** argv) {
     int port = (argc >= 2) ? std::atoi(argv[1]) : 12345;
-    char* input_file = (argc >= 3) ? argv[2] : (char*)"input.ppm";
+    char* input_file = (argc >= 3) ? argv[2] : (char*)"images/1.ppm";
     int total_s1_runs = (argc >= 4) ? std::atoi(argv[3]) : 1000;
     int s1_interval = 100;
     int s2_runs_per_s1 = 100;

@@ -1,7 +1,9 @@
 CXX ?= g++
 CXXFLAGS ?= -O3 -Wall -Wextra -std=c++17 -pthread -Icommon
 
-INPUT ?= input.ppm
+IMG_DIR ?= images
+IMAGE   ?= 1
+INPUT   ?= $(IMG_DIR)/$(IMAGE).ppm
 ITERS ?= 1000
 PORT  ?= 12345
 IP    ?= 127.0.0.1
