@@ -2,10 +2,11 @@
 # ============================================================================
 # run_experiments.sh - Lab 5 benchmark driver (single machine / loopback).
 #
-#   ./run_experiments.sh                       # defaults below
-#   ITERS=1000 REPS=3 IMAGES="1 2 3" ./run_experiments.sh
+#   ./run_experiments.sh                       # defaults below (all 7 images)
+#   ITERS=1000 REPS=3 IMAGES="1 2 3 4 5 6 7" ./run_experiments.sh
 #
-#   ITERS   iterations (assignment: 1000; must be a multiple of 100 for variant 2)
+#   ITERS   iterations (assignment: 1000; must be a multiple of 100 for variant 2;
+#           can also be passed as the first positional argument)
 #   REPS    repetitions per configuration; the MEAN is reported
 #   IMAGES  image numbers in images/N.ppm   (large images take a long time:
 #           baseline + 14 parallel runs per repetition, each ~ITERS full passes)
@@ -27,9 +28,9 @@
 set -u
 cd "$(dirname "$0")"
 
-ITERS=${ITERS:-1000}
+ITERS=${1:-${ITERS:-1000}}
 REPS=${REPS:-3}
-IMAGES=${IMAGES:-"1 2 3"}
+IMAGES=${IMAGES:-"1 2 3 4 5 6 7"}
 IMG_DIR=${IMG_DIR:-images}
 OUT_CSV=${OUT_CSV:-results.csv}
 PORT=${PORT:-12345}
@@ -75,7 +76,7 @@ run_sock() {
     ./part3_${s}_variant${v}_A.out $PORT "$IMG_PATH" $ITERS >/dev/null 2>&1 &
     local A=$!; sleep 0.2
     ./part3_${s}_variant${v}_B.out 127.0.0.1 $PORT output_part3_${s}_variant${v}.ppm
-    local rc=$?; wait $A; return $rc
+    local rc=$?; wait $A; local rca=$?; return $(( rc != 0 ? rc : rca ))
   }
   run_cfg "Part3_$s" "$v" 2 "$base_ms" "$base_hash" sock_once
 }

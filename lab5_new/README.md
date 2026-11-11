@@ -3,10 +3,12 @@
 You can run any `make` target from either the repository root (the top-level `makefile` forwards to `src/`) or inside `src/`.
 
 Default build/run variables (defined in `src/makefile`):
-- `INPUT=images/1.ppm` (`IMG_DIR=images`, `IMAGE=1`)
+- `INPUT=images/1.ppm` (`IMG_DIR=images`, `IMAGE=1`; images `1.ppm`–`7.ppm` are available, e.g. `make part1 IMAGE=3`)
 - `ITERS=1000`
 - `PORT=12345`
 - `IP=127.0.0.1`
+
+To run the local Part I/II benchmark suite across all 7 images (`images/1.ppm`–`7.ppm`), run `src/run_experiments.sh` (e.g. `ITERS=1000 REPS=3 ./run_experiments.sh`, or set `RUN_PART3=1` to include loopback Part III runs).
 
 ---
 
